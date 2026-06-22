@@ -574,7 +574,12 @@ impl LingxiState {
         pointer.frame(self);
     }
 
-    /// 处理滚轮
+    /// 处理滚轮 / 触控板滚动
+    ///
+    /// 两类源要分别处理:
+    /// - Finger/Continuous (触控板): 走连续 amount() → wl_pointer.axis
+    /// - Wheel (鼠标滚轮): amount() 多半为 0, 必须走 amount_v120() → wl_pointer.axis_value120
+    ///   否则 Firefox 等客户端收不到离散滚动信号, 滚轮无反应 (拖滚动条仍可用, 走按键事件).
     fn handle_pointer_axis<B: InputBackend>(&mut self, event: B::PointerAxisEvent) {
         let pointer = match self.seat.get_pointer() {
             Some(ptr) => ptr,
@@ -584,11 +589,28 @@ impl LingxiState {
         let source = event.source();
         let mut frame = AxisFrame::new(Event::time_msec(&event)).source(source);
 
+        // 连续值 (触控板)
         if let Some(amount) = event.amount(Axis::Horizontal) {
-            frame = frame.value(Axis::Horizontal, amount);
+            if amount.abs() > f64::EPSILON {
+                frame = frame.value(Axis::Horizontal, amount);
+            }
         }
         if let Some(amount) = event.amount(Axis::Vertical) {
-            frame = frame.value(Axis::Vertical, amount);
+            if amount.abs() > f64::EPSILON {
+                frame = frame.value(Axis::Vertical, amount);
+            }
+        }
+
+        // 离散 v120 (鼠标滚轮) — Firefox 依赖此事件滚动
+        if let Some(v120) = event.amount_v120(Axis::Horizontal) {
+            if v120 != 0.0 {
+                frame = frame.v120(Axis::Horizontal, v120 as i32);
+            }
+        }
+        if let Some(v120) = event.amount_v120(Axis::Vertical) {
+            if v120 != 0.0 {
+                frame = frame.v120(Axis::Vertical, v120 as i32);
+            }
         }
 
         pointer.axis(self, frame);
