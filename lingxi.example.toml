@@ -1,0 +1,47 @@
+# 灵犀 (lingxi) 示例配置
+# 复制到 ~/.config/lingxi/lingxi.toml 后按需修改
+
+[general]
+border_size = 2
+gaps_inner = 5
+gaps_outer = 10
+# 光标大小 (Adwaita 提供 24/30/36/48/72/96)
+cursor_size = 24
+# 焦点窗口边框颜色 (RGBA, 0.0~1.0) — 默认青色发光
+active_border_color = [0.0, 0.9, 0.8, 1.0]
+inactive_border_color = [0.3, 0.3, 0.3, 1.0]
+
+[animations]
+enabled = true
+window_open_ms = 200
+window_close_ms = 150
+workspace_switch_ms = 300
+
+[layout]
+default_layout = "dwindle"
+master_ratio = 0.55
+split_ratio = 0.5
+
+[decoration]
+# 圆角半径 (px)，设为 0 关闭圆角
+rounding = 10
+# 模糊 (需壁纸或半透明窗口才可见；当前为预留开关)
+blur_enabled = true
+blur_size = 8
+blur_passes = 2
+# 投影
+shadow_enabled = true
+shadow_range = 15
+shadow_color = [0.0, 0.0, 0.0, 0.5]
+shadow_offset_x = 0.0
+shadow_offset_y = 4.0
+
+# 快捷键 (省略则用内置默认值)
+# [[binds]]
+# keys = "Super+Return"
+# action = "exec"
+# arg = "alacritty"
+#
+# [[binds]]
+# keys = "Super+F"
+# action = "fullscreen"

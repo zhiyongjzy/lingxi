@@ -1,0 +1,48 @@
+[package]
+name = "lingxi"
+version = "0.1.0"
+edition = "2024"
+description = "灵犀 — A Rust Wayland compositor with silky animations and dynamic tiling"
+license = "MIT"
+
+[dependencies]
+# Smithay: Wayland compositor framework
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
+    "backend_winit",
+    "desktop",
+    "renderer_glow",
+    "use_system_lib",
+    "wayland_frontend",
+    "xwayland",
+] }
+smithay-drm-extras = { version = "0.1", optional = true }
+
+# 事件循环
+calloop = "0.14"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 配置
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# 数学/动画
+glam = "0.33"
+
+# 光标
+xcursor = "0.3"
+
+# PAM 认证 (锁屏密码验证) — 用 pam-sys 直接 FFI, 不要 bindgen/clang
+pam-sys = "0.5"
+libc = "0.2"
+
+[profile.release]
+lto = true
+opt-level = 3
