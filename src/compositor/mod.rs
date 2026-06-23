@@ -517,8 +517,14 @@ impl LingxiState {
         };
 
         if self.floating.contains(&focused) {
-            // 浮动 → 平铺: 布局树加叶子
+            // 浮动 → 平铺: 先把窗口移到 workspaces 末尾, 再树加最右叶子,
+            // 保持 workspaces tiled 顺序 == 树 in-order 顺序 (架构 A 顺序不变量, 复审 5.4)
             self.floating.remove(&focused);
+            {
+                let ws = &mut self.workspaces[self.active_workspace];
+                ws.retain(|w| w != &focused);
+                ws.push(focused.clone());
+            }
             self.layout_trees[self.active_workspace].insert();
             tracing::info!("窗口切回平铺");
         } else {
