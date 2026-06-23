@@ -252,9 +252,8 @@ impl XdgShellHandler for LingxiState {
                 self.fullscreen_window = None;
             }
 
-            // 清理浮动跟踪
-            self.floating.retain(|w| w != &window);
-            self.floating_geo.retain(|(w, _)| w != &window);
+            // 清理浮动跟踪 (FloatingManager.remove 同时清 window/geo/z, 修复旧 z_order 泄漏)
+            self.floating.remove(&window);
 
             self.animations.remove_window(&window);
             self.space.unmap_elem(&window);

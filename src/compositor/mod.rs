@@ -56,6 +56,80 @@ pub enum FullscreenPhase {
 }
 
 
+/// 单个浮动窗口的完整状态 (窗口 + 几何 + z 序) — 合并旧 floating/floating_geo/floating_z_order 三 Vec
+pub struct FloatingWindow {
+    pub window: Window,
+    pub geo: WindowGeometry,
+    pub z: usize,
+}
+
+/// 浮动窗口统一管理 (单一事实源).
+/// 旧的 floating / floating_geo / floating_z_order 三个平行 Vec 已合并于此,
+/// 消除三处同步; z 用单调递增计数器, z 大 = 上层.
+pub struct FloatingManager {
+    entries: Vec<FloatingWindow>,
+    next_z: usize,
+}
+
+impl FloatingManager {
+    pub fn new() -> Self {
+        Self { entries: Vec::new(), next_z: 0 }
+    }
+
+    pub fn contains(&self, w: &Window) -> bool {
+        self.entries.iter().any(|f| &f.window == w)
+    }
+
+    /// 平铺 → 浮动 (置于最上层)
+    pub fn add(&mut self, window: Window, geo: WindowGeometry) {
+        let z = self.next_z;
+        self.next_z += 1;
+        self.entries.push(FloatingWindow { window, geo, z });
+    }
+
+    /// 浮动 → 平铺 / 销毁. 返回是否曾浮动.
+    pub fn remove(&mut self, w: &Window) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|f| &f.window != w);
+        self.entries.len() < before
+    }
+
+    pub fn geo(&self, w: &Window) -> Option<WindowGeometry> {
+        self.entries.iter().find(|f| &f.window == w).map(|f| f.geo)
+    }
+
+    /// 可变几何 (移动/缩放用)
+    pub fn geo_mut(&mut self, w: &Window) -> Option<&mut WindowGeometry> {
+        self.entries.iter_mut().find(|f| &f.window == w).map(|f| &mut f.geo)
+    }
+
+    /// 更新几何; 不存在则 add (容错, 同旧 set_floating_geo 行为)
+    pub fn set_geo(&mut self, w: &Window, geo: WindowGeometry) {
+        if let Some(f) = self.entries.iter_mut().find(|f| &f.window == w) {
+            f.geo = geo;
+        } else {
+            let z = self.next_z;
+            self.next_z += 1;
+            self.entries.push(FloatingWindow { window: w.clone(), geo, z });
+        }
+    }
+
+    /// 提升到最上层 (bump z)
+    pub fn raise(&mut self, w: &Window) {
+        if let Some(f) = self.entries.iter_mut().find(|f| &f.window == w) {
+            f.z = self.next_z;
+            self.next_z += 1;
+        }
+    }
+
+    /// z 序列表 (z 升序 = 底→顶). 返回所有浮动窗口, 供渲染.
+    pub fn z_ordered(&self) -> Vec<&Window> {
+        let mut v: Vec<&FloatingWindow> = self.entries.iter().collect();
+        v.sort_by_key(|f| f.z);
+        v.into_iter().map(|f| &f.window).collect()
+    }
+}
+
 /// 合成器全局状态
 pub struct LingxiState {
     // === Smithay 协议状态 ===
@@ -123,12 +197,8 @@ pub struct LingxiState {
     /// 当前全屏窗口 (None = 无全屏)
     pub fullscreen_window: Option<Window>,
 
-    /// 浮动窗口列表 (脱离平铺)
-    pub floating: Vec<Window>,
-    /// 浮动窗口的几何 (位置+大小)
-    pub floating_geo: Vec<(Window, WindowGeometry)>,
-    /// 浮动窗口的 Z 序栈 (末尾 = 最上, 最近聚焦)
-    pub floating_z_order: std::collections::VecDeque<Window>,
+    /// 浮动窗口统一管理 (窗口 + 几何 + z 序, 单一事实源)
+    pub floating: FloatingManager,
     /// 全屏过渡阶段 (Wayland client ack 同步)
     pub fs_phase: FullscreenPhase,
 
@@ -234,9 +304,7 @@ impl LingxiState {
             active_workspace: 0,
             by_surface: std::collections::HashMap::new(),
             fullscreen_window: None,
-            floating: Vec::new(),
-            floating_geo: Vec::new(),
-            floating_z_order: std::collections::VecDeque::new(),
+            floating: FloatingManager::new(),
             fs_phase: FullscreenPhase::Off,
             config,
             start_time: std::time::Instant::now(),
@@ -343,10 +411,8 @@ impl LingxiState {
             let rect = if Some(w) == fs.as_ref() {
                 WindowGeometry { x: full.x, y: full.y, width: full.width, height: full.height }
             } else if self.floating.contains(w) {
-                self.floating_geo
-                    .iter()
-                    .find(|(fw, _)| fw == w)
-                    .map(|(_, g)| *g)
+                self.floating
+                    .geo(w)
                     .unwrap_or(WindowGeometry { x: area.x + 100.0, y: area.y + 100.0, width: 800.0, height: 600.0 })
             } else {
                 let g = geometries.get(tiled_idx).copied().unwrap_or(area);
@@ -435,8 +501,7 @@ impl LingxiState {
 
         if self.floating.contains(&focused) {
             // 浮动 → 平铺
-            self.floating.retain(|w| w != &focused);
-            self.floating_geo.retain(|(w, _)| w != &focused);
+            self.floating.remove(&focused);
             tracing::info!("窗口切回平铺");
         } else {
             // 平铺 → 浮动: 居中显示 (~60% 大小), 让浮动状态一眼可见
@@ -449,8 +514,7 @@ impl LingxiState {
                 width,
                 height,
             };
-            self.floating.push(focused.clone());
-            self.floating_geo.push((focused.clone(), cur));
+            self.floating.add(focused.clone(), cur);
             tracing::info!("窗口切为浮动 (居中 {}x{})", width as i32, height as i32);
         }
         self.relayout();
@@ -458,13 +522,12 @@ impl LingxiState {
 
     /// 提升窗口到 z_order 最上 (focus / click 时调用)
     pub fn raise_window(&mut self, w: &Window) {
-        self.floating_z_order.retain(|x| x != w);
-        self.floating_z_order.push_back(w.clone());
+        self.floating.raise(w);
     }
 
-    /// 获取 z 序的浮动窗口列表 (最早 → 最新)
+    /// 获取 z 序的浮动窗口列表 (底 → 顶), 供渲染. 返回所有浮动窗口.
     pub fn floating_z_ordered(&self) -> Vec<&Window> {
-        self.floating_z_order.iter().collect()
+        self.floating.z_ordered()
     }
 
     /// 窗口是否浮动
@@ -481,8 +544,8 @@ impl LingxiState {
 
     /// 取窗口当前几何 (优先浮动几何, 否则用 space 中的位置+尺寸)
     fn window_geometry(&self, window: &Window) -> WindowGeometry {
-        if let Some((_, g)) = self.floating_geo.iter().find(|(w, _)| w == window) {
-            return *g;
+        if let Some(g) = self.floating.geo(window) {
+            return g;
         }
         // 优先使用 compositor 自己的 layout target (AnimationManager.target),
         // 避免读到 wayland client 还没 ack 的 stale window.geometry()
@@ -519,11 +582,7 @@ impl LingxiState {
     /// 有拖动阈值 (~4px) 防止误触。
     /// 立即更新浮动窗口几何, 不走动画。reconfigure=true 时重发尺寸 configure。
     fn set_floating_geo(&mut self, window: &Window, geo: WindowGeometry, reconfigure: bool) {
-        if let Some((_, g)) = self.floating_geo.iter_mut().find(|(w, _)| w == window) {
-            *g = geo;
-        } else {
-            self.floating_geo.push((window.clone(), geo));
-        }
+        self.floating.set_geo(window, geo);
         // 直接落位 (移动/缩放需即时跟手)
         self.animations.remove_window(window);
         self.space.map_element(window.clone(), (geo.x as i32, geo.y as i32), false);
@@ -639,7 +698,7 @@ impl LingxiState {
             tracing::info!("move_floating: 窗口非浮动, 忽略");
             return;
         }
-        if let Some((_, g)) = self.floating_geo.iter_mut().find(|(w, _)| w == &focused) {
+        if let Some(g) = self.floating.geo_mut(&focused) {
             g.x += dx;
             g.y += dy;
             self.space.map_element(focused.clone(), (g.x as i32, g.y as i32), false);
@@ -657,7 +716,7 @@ impl LingxiState {
         if !self.floating.contains(&focused) {
             return;
         }
-        if let Some((_, g)) = self.floating_geo.iter_mut().find(|(w, _)| w == &focused) {
+        if let Some(g) = self.floating.geo_mut(&focused) {
             g.width = (g.width + dw).max(200.0);
             g.height = (g.height + dh).max(150.0);
             self.space.map_element(focused.clone(), (g.x as i32, g.y as i32), false);
