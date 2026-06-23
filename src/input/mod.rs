@@ -16,10 +16,6 @@ use smithay::{
     },
     utils::{Logical, Point, SERIAL_COUNTER},
     wayland::{
-        selection::{
-            data_device::DataDeviceHandler,
-            primary_selection::PrimarySelectionHandler,
-        },
         shell::wlr_layer::Layer,
     },
 };
@@ -486,6 +482,9 @@ impl LingxiState {
         );
         pointer.frame(self);
         self.pointer_location = pos;
+        if self.drag_window.is_some() {
+            self.update_drag();
+        }
     }
 
     /// 处理鼠标绝对移动 (winit 后端用绝对坐标)
@@ -522,43 +521,43 @@ impl LingxiState {
         );
         pointer.frame(self);
         self.pointer_location = pos;
+        if self.drag_window.is_some() {
+            self.update_drag();
+        }
     }
 
     /// 处理鼠标按键
     fn handle_pointer_button<B: InputBackend>(&mut self, event: B::PointerButtonEvent) {
         const BTN_LEFT: u32 = 0x110;
-        const BTN_RIGHT: u32 = 0x111;
 
         let serial = SERIAL_COUNTER.next_serial();
         let button = event.button_code();
         let button_state = event.state();
 
-        let mods = self
-            .seat
-            .get_keyboard()
-            .map(|k| k.modifier_state());
-        let logo = mods.map(|m| m.logo).unwrap_or(false);
-
-        if button_state == ButtonState::Pressed {
-            // B 方案: 鼠标只用于点击聚焦, 拖动用 Mod+Shift+方向键
-            let under = self.space.element_under(self.pointer_location);
-            if let Some((window, _)) = under {
-                let window = window.clone();
-                // 平铺布局: 点击只改焦点，不 raise (raise 会打乱 dwindle 顺序导致窗口跳位)
-                let surface = window
-                    .toplevel()
-                    .expect("xdg toplevel")
-                    .wl_surface()
-                    .clone();
-                self.set_keyboard_focus_with_selection(
-                    Some(surface),
-                    serial,
-                );
+        if button == BTN_LEFT {
+            if button_state == ButtonState::Pressed {
+                let under = self.space.element_under(self.pointer_location);
+                if let Some((window, _)) = under {
+                    let window = window.clone();
+                    // 点击聚焦 (平铺 + 浮动都改焦点)
+                    if let Some(toplevel) = window.toplevel() {
+                        self.set_keyboard_focus_with_selection(
+                            Some(toplevel.wl_surface().clone()),
+                            serial,
+                        );
+                    }
+                    // 浮动窗口: 点击 raise 到最上层 + 开始拖拽 (review #15).
+                    // 平铺不 raise (会打乱 dwindle 顺序).
+                    if self.floating.contains(&window) {
+                        self.raise_window(&window);
+                        self.start_drag(&window);
+                    }
+                } else {
+                    self.set_keyboard_focus_with_selection(None, serial);
+                }
             } else {
-                self.set_keyboard_focus_with_selection(
-                    None,
-                    serial,
-                );
+                // 释放: 结束拖拽
+                self.end_drag();
             }
         }
 

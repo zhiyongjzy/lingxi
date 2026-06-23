@@ -25,7 +25,7 @@ use smithay::{
             primary_selection::PrimarySelectionState,
         },
         output::OutputManagerState,
-        session_lock::{SessionLockManagerState, SessionLocker, LockSurface},
+        session_lock::{SessionLockManagerState},
         shell::xdg::XdgShellState,
         shell::xdg::decoration::XdgDecorationState,
         shell::wlr_layer::WlrLayerShellState,
@@ -179,6 +179,11 @@ pub struct LingxiState {
     // === 输入状态 ===
     pub pointer_location: Point<f64, Logical>,
 
+    /// 鼠标拖拽中的浮动窗口 (None = 未拖拽). review #15.
+    pub drag_window: Option<Window>,
+    /// 拖拽偏移: 指针位置 - 窗口左上 (拖拽期间保持, 窗口跟手)
+    pub drag_offset: (f64, f64),
+
     // === 动画 & 布局 ===
     pub animations: AnimationManager,
     pub layout: DwindleLayout,
@@ -298,6 +303,8 @@ impl LingxiState {
             display_handle: dh,
             loop_signal,
             pointer_location: Point::from((0.0, 0.0)),
+            drag_window: None,
+            drag_offset: (0.0, 0.0),
             animations: AnimationManager::new(),
             layout: DwindleLayout {
                 split_ratio: config.layout.split_ratio,
@@ -584,12 +591,6 @@ impl LingxiState {
         }
     }
 
-    /// 找到指针下的窗口
-    fn window_under_pointer(&self) -> Option<Window> {
-        self.space
-            .element_under(self.pointer_location)
-            .map(|(w, _)| w.clone())
-    }
 
     /// 拖动过程中更新 grab
     ///
@@ -609,6 +610,41 @@ impl LingxiState {
                 toplevel.send_configure();
             }
         }
+    }
+
+    /// 开始拖拽浮动窗口: 记录指针相对窗口左上的偏移 (review #15)
+    pub fn start_drag(&mut self, window: &Window) {
+        let win_loc = self.space.element_location(window).unwrap_or_default();
+        self.drag_offset = (
+            self.pointer_location.x - win_loc.x as f64,
+            self.pointer_location.y - win_loc.y as f64,
+        );
+        self.drag_window = Some(window.clone());
+    }
+
+    /// 拖拽中: 按指针位置 - 偏移 移动浮动窗口 (即时跟手, 不走动画/不发 configure)
+    pub fn update_drag(&mut self) {
+        let window = match self.drag_window.clone() {
+            Some(w) => w,
+            None => return,
+        };
+        let geo = match self.floating.geo(&window) {
+            Some(g) => g,
+            None => return,
+        };
+        let new_geo = WindowGeometry {
+            x: self.pointer_location.x - self.drag_offset.0,
+            y: self.pointer_location.y - self.drag_offset.1,
+            width: geo.width,
+            height: geo.height,
+        };
+        self.set_floating_geo(&window, new_geo, false);
+        self.needs_render = true;
+    }
+
+    /// 结束拖拽
+    pub fn end_drag(&mut self) {
+        self.drag_window = None;
     }
 
     /// 标记需要重绘 (commit/输入/布局/焦点变化时调用)
