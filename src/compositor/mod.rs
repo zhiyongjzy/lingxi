@@ -540,10 +540,14 @@ impl LingxiState {
             return;
         }
 
-        let updates = self.animations.tick();
+        let (updates, any_finished) = self.animations.tick();
         for (window, pos) in updates {
             // location 即可见内容目标位置; 渲染器会自行减去 geometry().loc 得到 buffer 原点
             self.space.map_element(window, pos, false);
+        }
+        // 动画刚结束的那帧置 needs_render, 保证最后一帧(落位)被绘制
+        if any_finished {
+            self.needs_render = true;
         }
     }
 

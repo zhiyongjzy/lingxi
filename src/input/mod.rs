@@ -133,6 +133,13 @@ impl LingxiState {
                                     if !ws.is_empty() {
                                         self.relayout();
                                     }
+                                    // 恢复键盘焦点 (与协议解锁路径一致, 否则解锁后焦点为 None)
+                                    let focus_target = ws
+                                        .first()
+                                        .and_then(|w| w.toplevel())
+                                        .map(|t| t.wl_surface().clone());
+                                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                                    self.set_keyboard_focus_with_selection(focus_target, serial);
                                 }
                                 Err(e) => {
                                     tracing::warn!("🔒 密码错误: {}", e);
@@ -405,9 +412,13 @@ impl LingxiState {
     }
 
     /// 交换焦点窗口与相邻窗口
+    ///
+    /// 关键: 交换的是 workspaces[active] 底层列表顺序, 再重 map + relayout.
+    /// 旧实现只 swap space 位置后 relayout, 而 relayout 按 space.elements() 插入序
+    /// 重新分配几何, 立刻覆盖交换 → 视觉无效果.
     fn swap_focused(&mut self, forward: bool) {
-        let windows: Vec<_> = self.space.elements().cloned().collect();
-        if windows.len() < 2 {
+        let active = self.active_workspace;
+        if self.workspaces[active].len() < 2 {
             return;
         }
 
@@ -418,7 +429,7 @@ impl LingxiState {
         let focused = keyboard.current_focus();
 
         let current_idx = match focused.as_ref().and_then(|surface| {
-            windows.iter().position(|w| {
+            self.workspaces[active].iter().position(|w| {
                 w.toplevel()
                     .map(|t| *t.wl_surface() == *surface)
                     .unwrap_or(false)
@@ -428,22 +439,28 @@ impl LingxiState {
             None => return,
         };
 
+        let len = self.workspaces[active].len();
         let swap_idx = if forward {
-            (current_idx + 1) % windows.len()
+            (current_idx + 1) % len
+        } else if current_idx == 0 {
+            len - 1
         } else {
-            if current_idx == 0 { windows.len() - 1 } else { current_idx - 1 }
+            current_idx - 1
         };
 
-        // 交换位置并重新布局
-        let pos_a = self.space.element_location(&windows[current_idx]);
-        let pos_b = self.space.element_location(&windows[swap_idx]);
+        // 交换底层窗口列表顺序 — relayout 按此顺序分配几何, 交换才生效
+        self.workspaces[active].swap(current_idx, swap_idx);
 
-        if let (Some(pa), Some(pb)) = (pos_a, pos_b) {
-            self.space.map_element(windows[current_idx].clone(), pb, false);
-            self.space.map_element(windows[swap_idx].clone(), pa, false);
-            self.relayout();
-            tracing::info!("交换窗口: {} <-> {}", current_idx, swap_idx);
+        // 重 map 让 space.elements() 顺序与 workspaces 一致, 再 relayout 触发动画
+        let ws = self.workspaces[active].clone();
+        for w in &ws {
+            self.space.unmap_elem(w);
         }
+        for w in &ws {
+            self.space.map_element(w.clone(), (0, 0), false);
+        }
+        self.relayout();
+        tracing::info!("交换窗口: {} <-> {}", current_idx, swap_idx);
     }
 
     /// 处理鼠标相对移动 (DRM/libinput 后端)

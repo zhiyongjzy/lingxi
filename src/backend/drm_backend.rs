@@ -109,9 +109,17 @@ pub fn run(config: crate::config::LingxiConfig) {
     // (dmabuf global 在 renderer 创建后注册 — 见下方)
 
     // 4. 找到主 GPU
-    let primary_gpu_path = udev::primary_gpu(session.seat())
-        .expect("Failed to find primary GPU")
-        .expect("No GPU found");
+    let primary_gpu_path = match udev::primary_gpu(session.seat()) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::error!("[DRM] 未找到主 GPU, 退出");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            tracing::error!("[DRM] 查找主 GPU 失败: {e}");
+            std::process::exit(1);
+        }
+    };
     eprintln!("[DRM] 主 GPU: {:?}", primary_gpu_path);
     info!("主 GPU: {:?}", primary_gpu_path);
 
@@ -391,13 +399,13 @@ pub fn run(config: crate::config::LingxiConfig) {
 
     let mut frame_count: u64 = 0;
     loop {
-        // 1. Dispatch Wayland clients
-        data.display
-            .dispatch_clients(&mut data.state)
-            .expect("dispatch_clients failed");
-        data.display
-            .flush_clients()
-            .expect("flush_clients failed");
+        // 1. Dispatch Wayland clients (出错不 panic, 避免单客户端打垮合成器)
+        if let Err(e) = data.display.dispatch_clients(&mut data.state) {
+            tracing::error!("dispatch_clients failed: {e}");
+        }
+        if let Err(e) = data.display.flush_clients() {
+            tracing::error!("flush_clients failed: {e}");
+        }
 
         // 2. 驱动 calloop (处理 libinput、DRM vblank、socket accept 等)
         if event_loop.dispatch(Some(Duration::from_millis(16)), &mut data).is_err() {

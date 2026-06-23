@@ -82,6 +82,28 @@ impl CompositorHandler for LingxiState {
             }
         }
 
+        // Layer surface 键盘焦点: 仅当 client 请求 Exclusive interactivity 时给焦点.
+        // swaybg/waybar 默认 None 不再抢终端焦点; fuzzel 等启动器设 Exclusive 后获得焦点.
+        // (new_layer_surface 时不判断, 因创建时 interactivity 恒为 None.)
+        {
+            use smithay::wayland::compositor::with_states;
+            use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, LayerSurfaceCachedState};
+            // 读 client 提交的 cached state (LayerSurfaceCachedState.keyboard_interactivity),
+            // 而非 LayerSurfaceAttributes.current (那是 server 端 state, 只有 size).
+            let interactivity = with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<LayerSurfaceCachedState>()
+                    .current()
+                    .keyboard_interactivity
+            });
+            // 仅 Exclusive 自动给焦点 (启动器); OnDemand 是按需(点击), 不在此抢焦点.
+            if interactivity == KeyboardInteractivity::Exclusive {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.set_keyboard_focus_with_selection(Some(surface.clone()), serial);
+            }
+        }
+
         // surface 有新内容提交 → 标记需要重绘
         self.needs_render = true;
     }
@@ -292,9 +314,6 @@ impl WlrLayerShellHandler for LingxiState {
         // Send initial configure — let arrange() determine the size based on anchors
         surface.send_configure();
 
-        // Give keyboard focus if the layer surface requests it
-        let wl_surface = surface.wl_surface().clone();
-
         // Wrap in desktop LayerSurface
         let desktop_surface = DesktopLayerSurface::new(surface, namespace);
 
@@ -304,12 +323,9 @@ impl WlrLayerShellHandler for LingxiState {
             let _ = map.map_layer(&desktop_surface);
         }
 
-        // Focus the layer surface (launchers like fuzzel need keyboard input)
-        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-        self.set_keyboard_focus_with_selection(
-            Some(wl_surface),
-            serial,
-        );
+        // 注意: 不在此处给键盘焦点. 创建时 keyboard_interactivity 恒为 None (协议默认),
+        // 无条件 focus 会让 swaybg/waybar 抢走终端焦点. 焦点改在 commit() 里按 client
+        // 实际请求的 interactivity 决定 (见 commit handler).
 
         self.needs_render = true;
     }
@@ -328,6 +344,23 @@ impl WlrLayerShellHandler for LingxiState {
             if let Some(desktop_ls) = to_remove {
                 map.unmap_layer(&desktop_ls);
             }
+        }
+
+        // 若被销毁的 layer surface 持有键盘焦点 (如 fuzzel 关闭), 恢复到当前工作区首个 toplevel
+        let was_focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|kb| kb.current_focus())
+            .map(|f| &f == surface.wl_surface())
+            .unwrap_or(false);
+        if was_focused {
+            let active = self.active_workspace;
+            let focus_target = self.workspaces[active]
+                .first()
+                .and_then(|w| w.toplevel())
+                .map(|t| t.wl_surface().clone());
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.set_keyboard_focus_with_selection(focus_target, serial);
         }
 
         self.needs_render = true;

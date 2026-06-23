@@ -208,17 +208,17 @@ pub fn run(config: crate::config::LingxiConfig) {
             scene::send_frames(&data.state, &output);
         }
 
-        // Dispatch clients
-        data.display
-            .dispatch_clients(&mut data.state)
-            .expect("dispatch_clients failed");
-        data.display
-            .flush_clients()
-            .expect("flush_clients failed");
+        // Dispatch clients (出错不 panic, 避免单客户端打垮合成器)
+        if let Err(e) = data.display.dispatch_clients(&mut data.state) {
+            tracing::error!("dispatch_clients failed: {e}");
+        }
+        if let Err(e) = data.display.flush_clients() {
+            tracing::error!("flush_clients failed: {e}");
+        }
 
-        event_loop
-            .dispatch(Some(Duration::from_millis(1)), &mut data)
-            .expect("event loop dispatch failed");
+        if let Err(e) = event_loop.dispatch(Some(Duration::from_millis(1)), &mut data) {
+            tracing::error!("event loop dispatch failed: {e}");
+        }
     }
 
     info!("灵犀 compositor 已退出 (winit)");

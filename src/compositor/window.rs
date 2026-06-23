@@ -166,14 +166,21 @@ impl AnimationManager {
         }
     }
 
-    /// 推进所有动画一帧，返回有动画在播放的窗口列表
-    pub fn tick(&mut self) -> Vec<(Window, Point<i32, Logical>)> {
+    /// 推进所有动画一帧，返回 (有动画在播放的窗口列表, 本帧是否有动画刚结束)
+    ///
+    /// any_finished 用于让主循环在动画结束的那帧再渲染一次, 否则末帧可能不绘制.
+    pub fn tick(&mut self) -> (Vec<(Window, Point<i32, Logical>)>, bool) {
         let mut updates = Vec::new();
+        let mut any_finished = false;
         for (window, anim) in &mut self.animations {
+            let was_animating = anim.is_animating();
             anim.tick();
+            if was_animating && !anim.is_animating() {
+                any_finished = true;
+            }
             updates.push((window.clone(), anim.current.to_point()));
         }
-        updates
+        (updates, any_finished)
     }
 
     /// 是否有任何动画在播放
