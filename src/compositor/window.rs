@@ -1,5 +1,6 @@
 //! 窗口动画状态管理
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use smithay::{
@@ -105,8 +106,8 @@ impl WindowAnimation {
 
 /// 管理所有窗口的动画状态
 pub struct AnimationManager {
-    /// Window → 动画状态 (用 Window 的内部 id 作为 key)
-    animations: Vec<(Window, WindowAnimation)>,
+    /// Window → 动画状态 (Window 实现 Hash+Eq, 直接做 key, O(1) 查找)
+    animations: HashMap<Window, WindowAnimation>,
     /// 动画持续时间
     pub duration: Duration,
     /// 动画曲线
@@ -116,7 +117,7 @@ pub struct AnimationManager {
 impl AnimationManager {
     pub fn new() -> Self {
         Self {
-            animations: Vec::new(),
+            animations: HashMap::new(),
             // 用 spring 物理时,持续时间作为 "硬上限" (强制吸附到 target)
             // spring 数学上渐近到 end 但永不"完全到",所以给到 350ms 既能
             // 让回弹明显,又不会动画一直跑浪费 GPU
@@ -143,18 +144,18 @@ impl AnimationManager {
             target,
         };
         anim.animate_to(target, self.curve.clone(), self.duration);
-        self.animations.push((window, anim));
+        self.animations.insert(window, anim);
     }
 
     /// 移除窗口的动画跟踪
     pub fn remove_window(&mut self, window: &Window) {
-        self.animations.retain(|(w, _)| w != window);
+        self.animations.remove(window);
     }
 
     /// 更新所有窗口的目标位置 (layout 变化时调用)
     pub fn retarget(&mut self, targets: &[(Window, AnimatedRect)]) {
         for (window, target) in targets {
-            if let Some((_, anim)) = self.animations.iter_mut().find(|(w, _)| w == window) {
+            if let Some(anim) = self.animations.get_mut(window) {
                 if (anim.target.x - target.x).abs() > 1.0
                     || (anim.target.y - target.y).abs() > 1.0
                     || (anim.target.width - target.width).abs() > 1.0
@@ -182,23 +183,21 @@ impl AnimationManager {
         }
         (updates, any_finished)
     }
+    // 注: HashMap iter 顺序不定, 但 tick 对每个窗口独立推进, 顺序不影响结果.
 
     /// 是否有任何动画在播放
     pub fn has_active_animations(&self) -> bool {
-        self.animations.iter().any(|(_, a)| a.is_animating())
+        self.animations.values().any(|a| a.is_animating())
     }
 
     /// 获取窗口当前动画位置
     pub fn get_position(&self, window: &Window) -> Option<Point<i32, Logical>> {
-        self.animations
-            .iter()
-            .find(|(w, _)| w == window)
-            .map(|(_, a)| a.current.to_point())
+        self.animations.get(window).map(|a| a.current.to_point())
     }
 
     /// 拖动期间: 同步 current 位置, 清掉未完成的 x/y 动画 (避免拖动时还播动画)
     pub fn set_current_position(&mut self, window: &Window, x: f64, y: f64) {
-        if let Some((_, anim)) = self.animations.iter_mut().find(|(w, _)| w == window) {
+        if let Some(anim) = self.animations.get_mut(window) {
             anim.current.x = x;
             anim.current.y = y;
             anim.x = None;
@@ -213,10 +212,7 @@ impl AnimationManager {
     /// 用于: interactive_move_start / relayout 等需膁"compositor 意图 size" 的场景,
     /// 避免读到 wayland client 还没 ack 的 stale `window.geometry()`.
     pub fn get_target(&self, window: &Window) -> Option<AnimatedRect> {
-        self.animations
-            .iter()
-            .find(|(w, _)| w == window)
-            .map(|(_, a)| a.target)
+        self.animations.get(window).map(|a| a.target)
     }
 
     /// 焦点切换时"上推"动画 — 让当前窗口位置不变, 但重新触发一次轻量的 reflow

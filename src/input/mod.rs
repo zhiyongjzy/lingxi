@@ -353,12 +353,8 @@ impl LingxiState {
         };
 
         if let Some(focus_surface) = keyboard.current_focus() {
-            // 找到对应的 Window
-            let window = self.space.elements().find(|w| {
-                w.toplevel()
-                    .map(|t| *t.wl_surface() == focus_surface)
-                    .unwrap_or(false)
-            });
+            // 找到对应的 Window (O(1) 索引查找)
+            let window = self.by_surface.get(&focus_surface).cloned();
 
             if let Some(window) = window {
                 if let Some(toplevel) = window.toplevel() {

@@ -113,6 +113,13 @@ pub struct LingxiState {
     pub workspaces: Vec<Vec<Window>>,
     pub active_workspace: usize,
 
+    /// 窗口索引: toplevel wl_surface → Window (O(1) 查找, 替代 space.elements().find 线性扫描).
+    /// 在 new_toplevel 插入, toplevel_destroyed 移除; switch/move 不新建不销毁窗口, 不触碰.
+    pub by_surface: std::collections::HashMap<
+        smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        Window,
+    >,
+
     /// 当前全屏窗口 (None = 无全屏)
     pub fullscreen_window: Option<Window>,
 
@@ -225,6 +232,7 @@ impl LingxiState {
             },
             workspaces,
             active_workspace: 0,
+            by_surface: std::collections::HashMap::new(),
             fullscreen_window: None,
             floating: Vec::new(),
             floating_geo: Vec::new(),
@@ -555,14 +563,7 @@ impl LingxiState {
     pub fn focused_window(&self) -> Option<Window> {
         let keyboard = self.seat.get_keyboard()?;
         let focus_surface = keyboard.current_focus()?;
-        self.space
-            .elements()
-            .find(|w| {
-                w.toplevel()
-                    .map(|t| *t.wl_surface() == focus_surface)
-                    .unwrap_or(false)
-            })
-            .cloned()
+        self.by_surface.get(&focus_surface).cloned()
     }
 
     /// Switch to workspace N (0-based index)

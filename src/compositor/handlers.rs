@@ -61,11 +61,7 @@ impl CompositorHandler for LingxiState {
         self.popup_manager.commit(surface);
 
         // Update window bounding box so element_under() works correctly
-        let committed_window = self.space.elements().find(|w| {
-            w.toplevel()
-                .map(|t| *t.wl_surface() == *surface)
-                .unwrap_or(false)
-        }).cloned();
+        let committed_window = self.by_surface.get(surface).cloned();
 
         if let Some(window) = &committed_window {
             window.on_commit();
@@ -132,6 +128,8 @@ impl XdgShellHandler for LingxiState {
 
         // Add window to current workspace
         self.workspaces[self.active_workspace].push(window.clone());
+        // 维护 surface→Window 索引 (O(1) 查找用)
+        self.by_surface.insert(surface.wl_surface().clone(), window.clone());
 
         // 先把窗口 map 到 space (初始位置放中心)
         self.space.map_element(window.clone(), (output_center.0 as i32, output_center.1 as i32), true);
@@ -225,12 +223,7 @@ impl XdgShellHandler for LingxiState {
         if let Ok(wl_s) = smithay::desktop::find_popup_root_surface(
             &smithay::desktop::PopupKind::Xdg(surface.clone()),
         ) {
-            if let Some(root) = self
-                .space
-                .elements()
-                .find(|w| w.toplevel().map(|t| *t.wl_surface() == wl_s).unwrap_or(false))
-                .cloned()
-            {
+            if let Some(root) = self.by_surface.get(&wl_s).cloned() {
                 if let Some(toplevel) = root.toplevel() {
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     let _ = self.popup_manager.grab_popup::<Self>(
@@ -245,12 +238,10 @@ impl XdgShellHandler for LingxiState {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.toplevel().expect("xdg toplevel") == &surface)
-            .cloned();
+        let window = self.by_surface.get(surface.wl_surface()).cloned();
         if let Some(window) = window {
+            // 移除 surface→Window 索引
+            self.by_surface.remove(surface.wl_surface());
             // Remove from workspace tracking
             for ws in &mut self.workspaces {
                 ws.retain(|w| w != &window);
@@ -527,14 +518,9 @@ impl InputMethodHandler for LingxiState {
 
     fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
         // 找到 parent surface 对应的窗口，返回其屏幕位置
-        self.space
-            .elements()
-            .find(|w| {
-                w.toplevel()
-                    .map(|t| *t.wl_surface() == *parent)
-                    .unwrap_or(false)
-            })
-            .map(|w| self.window_screen_geometry(&w))
+        self.by_surface
+            .get(parent)
+            .map(|w| self.window_screen_geometry(w))
             .unwrap_or_default()
     }
 }
