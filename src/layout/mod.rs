@@ -136,3 +136,107 @@ impl LayoutEngine for MasterStackLayout {
         result
     }
 }
+
+// ============================================================================
+// 持久化 dwindle 布局树 (架构 A)
+// ============================================================================
+
+enum LayoutNode {
+    Leaf,
+    Split { horizontal: bool, left: Box<LayoutNode>, right: Box<LayoutNode> },
+}
+
+pub struct LayoutTree {
+    root: Option<Box<LayoutNode>>,
+    split_ratio: f64,
+    inner_gap: f64,
+    len: usize,
+}
+
+impl LayoutTree {
+    pub fn new(split_ratio: f64, inner_gap: f64) -> Self {
+        Self { root: None, split_ratio, inner_gap, len: 0 }
+    }
+    pub fn len(&self) -> usize { self.len }
+    pub fn insert(&mut self) {
+        let horizontal = self.len % 2 == 1;
+        self.len += 1;
+        self.root = Some(match self.root.take() {
+            None => Box::new(LayoutNode::Leaf),
+            Some(root) => split_deepest_right(root, horizontal),
+        });
+    }
+    pub fn remove(&mut self, idx: usize) {
+        if let Some(root) = self.root.take() {
+            let mut counter = 0usize;
+            let mut done = false;
+            self.root = remove_node(root, idx, &mut counter, &mut done);
+            if done { self.len -= 1; }
+        }
+    }
+    pub fn arrange(&self, area: crate::layout::WindowGeometry) -> Vec<crate::layout::WindowGeometry> {
+        let mut out = Vec::with_capacity(self.len);
+        if let Some(root) = &self.root {
+            arrange_node(root, area, self.inner_gap, self.split_ratio, &mut out);
+        }
+        out
+    }
+}
+
+fn split_deepest_right(node: Box<LayoutNode>, horizontal: bool) -> Box<LayoutNode> {
+    match *node {
+        LayoutNode::Leaf => Box::new(LayoutNode::Split {
+            horizontal,
+            left: Box::new(LayoutNode::Leaf),
+            right: Box::new(LayoutNode::Leaf),
+        }),
+        LayoutNode::Split { horizontal: h, left, right } => Box::new(LayoutNode::Split {
+            horizontal: h, left, right: split_deepest_right(right, horizontal),
+        }),
+    }
+}
+
+fn remove_node(node: Box<LayoutNode>, idx: usize, counter: &mut usize, done: &mut bool) -> Option<Box<LayoutNode>> {
+    if *done { return Some(node); }
+    match *node {
+        LayoutNode::Leaf => {
+            if *counter == idx { *done = true; return None; }
+            *counter += 1;
+            Some(node)
+        }
+        LayoutNode::Split { horizontal, left, right } => {
+            let new_left = remove_node(left, idx, counter, done);
+            if new_left.is_none() { return Some(right); }
+            let new_right = remove_node(right, idx, counter, done);
+            if new_right.is_none() { return new_left; }
+            Some(Box::new(LayoutNode::Split { horizontal, left: new_left.unwrap(), right: new_right.unwrap() }))
+        }
+    }
+}
+
+fn arrange_node(node: &LayoutNode, area: crate::layout::WindowGeometry, gap: f64, split_ratio: f64, out: &mut Vec<crate::layout::WindowGeometry>) {
+    match node {
+        LayoutNode::Leaf => {
+            out.push(crate::layout::WindowGeometry {
+                x: area.x.round(), y: area.y.round(),
+                width: area.width.round(), height: area.height.round(),
+            });
+        }
+        LayoutNode::Split { horizontal, left, right } => {
+            if *horizontal {
+                let w = (area.width * split_ratio - gap / 2.0).round();
+                let left_area = crate::layout::WindowGeometry { x: area.x.round(), y: area.y.round(), width: w, height: area.height.round() };
+                let right_area = crate::layout::WindowGeometry { x: area.x + w + gap, y: area.y, width: area.width - w - gap, height: area.height };
+                arrange_node(left, left_area, gap, split_ratio, out);
+                arrange_node(right, right_area, gap, split_ratio, out);
+            } else {
+                let h = (area.height * split_ratio - gap / 2.0).round();
+                let left_area = crate::layout::WindowGeometry { x: area.x.round(), y: area.y.round(), width: area.width.round(), height: h };
+                let right_area = crate::layout::WindowGeometry { x: area.x, y: area.y + h + gap, width: area.width, height: area.height - h - gap };
+                arrange_node(left, left_area, gap, split_ratio, out);
+                arrange_node(right, right_area, gap, split_ratio, out);
+            }
+        }
+    }
+}
+

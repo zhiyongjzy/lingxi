@@ -34,7 +34,6 @@ use smithay::{
 };
 
 use super::{ClientState, LingxiState};
-use crate::layout::LayoutEngine;
 use smithay::wayland::text_input::TextInputSeat;
 
 // ========== Buffer ==========
@@ -126,22 +125,28 @@ impl XdgShellHandler for LingxiState {
             .map(|geo| (geo.size.w as f64 / 2.0, geo.size.h as f64 / 2.0))
             .unwrap_or((640.0, 400.0));
 
-        // Add window to current workspace
-        self.workspaces[self.active_workspace].push(window.clone());
+        // Add window to current workspace + 布局树加叶子 (新窗口默认 tiled)
+        let active = self.active_workspace;
+        self.workspaces[active].push(window.clone());
         // 维护 surface→Window 索引 (O(1) 查找用)
         self.by_surface.insert(surface.wl_surface().clone(), window.clone());
+        self.layout_trees[active].insert();
 
         // 先把窗口 map 到 space (初始位置放中心)
         self.space.map_element(window.clone(), (output_center.0 as i32, output_center.1 as i32), true);
 
-        // 计算新的平铺布局 (含刚加入的窗口)
-        let windows: Vec<_> = self.space.elements().cloned().collect();
-        let count = windows.len();
+        // 计算新的平铺布局 (布局树, 含刚加入的窗口)
         let area = self.usable_area();
-        let geometries = self.layout.arrange(count, area);
+        let geometries = self.layout_trees[active].arrange(area);
+        let tiled: Vec<Window> = self.workspaces[active]
+            .iter()
+            .filter(|w| !self.floating.contains(w))
+            .cloned()
+            .collect();
+        let count = tiled.len();
 
-        // 找到新窗口的目标位置
-        let new_idx = windows.iter().position(|w| w == &window).unwrap_or(count - 1);
+        // 新窗口在 tiled 末尾 (刚 push), 取其目标几何做入场动画
+        let new_idx = tiled.iter().position(|w| w == &window).unwrap_or(count.saturating_sub(1));
         let target = super::window::AnimatedRect {
             x: geometries[new_idx].x,
             y: geometries[new_idx].y,
@@ -153,7 +158,7 @@ impl XdgShellHandler for LingxiState {
         self.animations.add_window(window, target, output_center);
 
         // 其他已有窗口也要动画到新位置 (重新平铺)
-        let targets: Vec<_> = windows
+        let targets: Vec<_> = tiled
             .iter()
             .zip(geometries.iter())
             .map(|(w, geo)| {
@@ -171,7 +176,7 @@ impl XdgShellHandler for LingxiState {
         self.animations.retarget(&targets);
 
         // 告诉所有窗口新的 configure size (让客户端缩放)
-        for (i, w) in windows.iter().enumerate() {
+        for (i, w) in tiled.iter().enumerate() {
             if let Some(toplevel) = w.toplevel() {
                 toplevel.with_pending_state(|pending| {
                     pending.size = Some(
@@ -242,6 +247,12 @@ impl XdgShellHandler for LingxiState {
         if let Some(window) = window {
             // 移除 surface→Window 索引
             self.by_surface.remove(surface.wl_surface());
+            // 布局树: tiled 窗口删对应叶子 (浮动不在树中). 必须在 retain 之前算槽位.
+            if !self.floating.contains(&window) {
+                if let Some(slot) = self.tiled_slot_of(&window) {
+                    self.layout_trees[self.active_workspace].remove(slot);
+                }
+            }
             // Remove from workspace tracking
             for ws in &mut self.workspaces {
                 ws.retain(|w| w != &window);

@@ -37,7 +37,7 @@ use smithay::{
 };
 
 use crate::config::LingxiConfig;
-use crate::layout::{DwindleLayout, LayoutEngine, WindowGeometry};
+use crate::layout::{DwindleLayout, LayoutTree, WindowGeometry};
 use window::{AnimatedRect, AnimationManager};
 
 /// Number of workspaces
@@ -182,6 +182,9 @@ pub struct LingxiState {
     // === 动画 & 布局 ===
     pub animations: AnimationManager,
     pub layout: DwindleLayout,
+    /// 每工作区一棵持久化 dwindle 布局树 (架构 A). 跟踪 tiled 窗口分割结构.
+    /// TODO(架构I): 合并入 Workspace struct.
+    pub layout_trees: Vec<LayoutTree>,
 
     // === 工作区 ===
     pub workspaces: Vec<Vec<Window>>,
@@ -300,6 +303,9 @@ impl LingxiState {
                 split_ratio: config.layout.split_ratio,
                 inner_gap: config.general.gaps_inner as f64,
             },
+            layout_trees: (0..NUM_WORKSPACES)
+                .map(|_| LayoutTree::new(config.layout.split_ratio, config.general.gaps_inner as f64))
+                .collect(),
             workspaces,
             active_workspace: 0,
             by_surface: std::collections::HashMap::new(),
@@ -385,9 +391,18 @@ impl LingxiState {
     }
 
     /// 重新计算布局并动画过渡所有窗口到新位置
+    /// 取窗口在当前工作区 tiled 列表中的槽位 (排除浮动). 用于布局树 insert/remove 定位.
+    fn tiled_slot_of(&self, window: &Window) -> Option<usize> {
+        self.workspaces[self.active_workspace]
+            .iter()
+            .filter(|w| !self.floating.contains(w))
+            .position(|w| w == window)
+    }
+
     pub fn relayout(&mut self) {
-        let all_windows: Vec<Window> = self.space.elements().cloned().collect();
-        if all_windows.is_empty() {
+        let active = self.active_workspace;
+        let ws: Vec<Window> = self.workspaces[active].clone();
+        if ws.is_empty() {
             return;
         }
         self.needs_render = true;
@@ -396,18 +411,13 @@ impl LingxiState {
         let full = self.output_full_area();
         let fs = self.fullscreen_window.clone();
 
-        // 平铺窗口 = 全部 - 浮动 (全屏窗口仍参与 tiled 列表占位, 但渲染时覆盖)
-        let tiled: Vec<Window> = all_windows
-            .iter()
-            .filter(|w| !self.floating.contains(w))
-            .cloned()
-            .collect();
-        let geometries = self.layout.arrange(tiled.len(), area);
+        // 几何由持久化布局树算 (树自带 tiled 叶子数, 架构 A). 全屏窗口仍占树槽位但渲染时覆盖.
+        let geometries = self.layout_trees[active].arrange(area);
 
-        // 计算每个窗口的目标矩形
-        let mut targets: Vec<(Window, AnimatedRect)> = Vec::with_capacity(all_windows.len());
+        // 计算每个窗口的目标矩形 (按 workspaces 顺序, 与树槽位对齐)
+        let mut targets: Vec<(Window, AnimatedRect)> = Vec::with_capacity(ws.len());
         let mut tiled_idx = 0usize;
-        for w in &all_windows {
+        for w in &ws {
             let rect = if Some(w) == fs.as_ref() {
                 WindowGeometry { x: full.x, y: full.y, width: full.width, height: full.height }
             } else if self.floating.contains(w) {
@@ -500,11 +510,13 @@ impl LingxiState {
         };
 
         if self.floating.contains(&focused) {
-            // 浮动 → 平铺
+            // 浮动 → 平铺: 布局树加叶子
             self.floating.remove(&focused);
+            self.layout_trees[self.active_workspace].insert();
             tracing::info!("窗口切回平铺");
         } else {
-            // 平铺 → 浮动: 居中显示 (~60% 大小), 让浮动状态一眼可见
+            // 平铺 → 浮动: 先算 tiled 槽位, 再加浮动, 再删树叶
+            let slot = self.tiled_slot_of(&focused);
             let area = self.usable_area();
             let width = area.width * 0.6;
             let height = area.height * 0.6;
@@ -515,6 +527,9 @@ impl LingxiState {
                 height,
             };
             self.floating.add(focused.clone(), cur);
+            if let Some(s) = slot {
+                self.layout_trees[self.active_workspace].remove(s);
+            }
             tracing::info!("窗口切为浮动 (居中 {}x{})", width as i32, height as i32);
         }
         self.relayout();
@@ -667,11 +682,15 @@ impl LingxiState {
             self.space.map_element(window.clone(), (0, 0), false);
         }
 
-        // Relayout
+        // Relayout (用目标工作区的布局树; 只给 tiled 窗口入场动画)
         if !ws_windows.is_empty() {
-            let count = ws_windows.len();
             let area = self.usable_area();
-            let geometries = self.layout.arrange(count, area);
+            let geometries = self.layout_trees[target].arrange(area);
+            let tiled: Vec<Window> = ws_windows
+                .iter()
+                .filter(|w| !self.floating.contains(w))
+                .cloned()
+                .collect();
 
             let output_center = self
                 .space
@@ -681,7 +700,7 @@ impl LingxiState {
                 .map(|geo| (geo.size.w as f64 / 2.0, geo.size.h as f64 / 2.0))
                 .unwrap_or((640.0, 400.0));
 
-            for (i, window) in ws_windows.iter().enumerate() {
+            for (i, window) in tiled.iter().enumerate() {
                 let target_rect = AnimatedRect {
                     x: geometries[i].x,
                     y: geometries[i].y,
@@ -760,10 +779,20 @@ impl LingxiState {
 
         // Remove from current workspace
         let current = self.active_workspace;
+        let was_floating = self.floating.contains(&focused);
+        // 布局树: tiled 窗口从源工作区删叶子 (浮动不在树中, 不动)
+        if !was_floating {
+            if let Some(slot) = self.tiled_slot_of(&focused) {
+                self.layout_trees[current].remove(slot);
+            }
+        }
         self.workspaces[current].retain(|w| w != &focused);
 
         // Add to target workspace
         self.workspaces[target].push(focused.clone());
+        if !was_floating {
+            self.layout_trees[target].insert();
+        }
 
         if target != current {
             // Unmap from space (since it's now in a different workspace)

@@ -412,51 +412,47 @@ impl LingxiState {
     /// 关键: 交换的是 workspaces[active] 底层列表顺序, 再重 map + relayout.
     /// 旧实现只 swap space 位置后 relayout, 而 relayout 按 space.elements() 插入序
     /// 重新分配几何, 立刻覆盖交换 → 视觉无效果.
+    /// 交换焦点窗口与相邻 tiled 窗口.
+    /// 架构 A: relayout 读 workspaces 顺序分配树几何, 故直接交换 workspaces 里两个窗口
+    /// 的位置即可, 无需 batch2 的 unmap/remap 全部窗口.
     fn swap_focused(&mut self, forward: bool) {
         let active = self.active_workspace;
-        if self.workspaces[active].len() < 2 {
+        let focused = match self.focused_window() {
+            Some(w) => w,
+            None => return,
+        };
+
+        // tiled 列表 (workspaces 顺序, 排除浮动) — 与布局树槽位对齐
+        let tiled: Vec<_> = self.workspaces[active]
+            .iter()
+            .filter(|w| !self.floating.contains(w))
+            .cloned()
+            .collect();
+        if tiled.len() < 2 {
             return;
         }
 
-        let keyboard = match self.seat.get_keyboard() {
-            Some(kb) => kb,
-            None => return,
-        };
-        let focused = keyboard.current_focus();
-
-        let current_idx = match focused.as_ref().and_then(|surface| {
-            self.workspaces[active].iter().position(|w| {
-                w.toplevel()
-                    .map(|t| *t.wl_surface() == *surface)
-                    .unwrap_or(false)
-            })
-        }) {
+        let t = match tiled.iter().position(|w| w == &focused) {
             Some(i) => i,
             None => return,
         };
-
-        let len = self.workspaces[active].len();
-        let swap_idx = if forward {
-            (current_idx + 1) % len
-        } else if current_idx == 0 {
-            len - 1
+        let s = if forward {
+            (t + 1) % tiled.len()
+        } else if t == 0 {
+            tiled.len() - 1
         } else {
-            current_idx - 1
+            t - 1
         };
 
-        // 交换底层窗口列表顺序 — relayout 按此顺序分配几何, 交换才生效
-        self.workspaces[active].swap(current_idx, swap_idx);
+        // 在 workspaces 里交换这两个窗口的位置 (relayout 按此顺序分配树几何, 交换生效)
+        let win_a = tiled[t].clone();
+        let win_b = tiled[s].clone();
+        let ia = self.workspaces[active].iter().position(|w| w == &win_a).unwrap();
+        let ib = self.workspaces[active].iter().position(|w| w == &win_b).unwrap();
+        self.workspaces[active].swap(ia, ib);
 
-        // 重 map 让 space.elements() 顺序与 workspaces 一致, 再 relayout 触发动画
-        let ws = self.workspaces[active].clone();
-        for w in &ws {
-            self.space.unmap_elem(w);
-        }
-        for w in &ws {
-            self.space.map_element(w.clone(), (0, 0), false);
-        }
         self.relayout();
-        tracing::info!("交换窗口: {} <-> {}", current_idx, swap_idx);
+        tracing::info!("交换窗口: {} <-> {}", t, s);
     }
 
     /// 处理鼠标相对移动 (DRM/libinput 后端)
