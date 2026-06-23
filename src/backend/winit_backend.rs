@@ -161,21 +161,11 @@ pub fn run(config: crate::config::LingxiConfig) {
             data.state.handle_input(event);
         }
 
-        // 刷新 Space 状态
-        data.state.space.refresh();
-        // 清理已关闭的 popup
-        data.state.popup_manager.cleanup();
-        // 重新 arrange 所有 outputs 的 layer map (见 drm_backend 同注释)
-        for output in data.state.space.outputs().cloned().collect::<Vec<_>>() {
-            let _ = smithay::desktop::layer_map_for_output(&output).arrange();
-        }
-
-        // 推进动画
-        data.state.tick_animations();
+        // 共享: 刷新 space / 清 popup / arrange layer / 推进动画 (架构 F)
+        data.state.pre_render_tick();
 
         // 按需渲染 (脏标记或动画进行中才重绘)
-        let animating = data.state.animations.has_active_animations();
-        if data.state.needs_render || animating {
+        if data.state.should_render() {
             let render_ok = {
                 let (renderer, mut framebuffer) = match backend.bind() {
                     Ok(r) => r,

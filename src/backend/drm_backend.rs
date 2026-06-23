@@ -412,24 +412,11 @@ pub fn run(config: crate::config::LingxiConfig) {
             break;
         }
 
-        // 3. 刷新 Space 状态 (清理已关闭窗口、更新 surface 状态)
-        data.state.space.refresh();
-        // 清理已关闭的 popup (释放 stale 资源)
-        data.state.popup_manager.cleanup();
-        // 重新 arrange 所有 outputs 的 layer map — 解决 swaybg 启动后只占中间一小块
-        // (smithay 不自动调 arrange,只更新 cached state; 没有这一步,layer 渲染位置用 stale None)
-        // 在主循环而非 commit handler 里调,避免持锁冲突死锁
-        {
-            use smithay::desktop::layer_map_for_output;
-            for output in data.state.space.outputs().cloned().collect::<Vec<_>>() {
-                let _ = layer_map_for_output(&output).arrange();
-            }
-        }
+        // 3. 共享: 刷新 space / 清 popup / arrange layer / 推进动画 (架构 F)
+        data.state.pre_render_tick();
 
-        // 4. 动画 + 按需渲染 (脏标记或动画进行中才重绘)
-        data.state.tick_animations();
-        let animating = data.state.animations.has_active_animations();
-        if data.state.needs_render || animating {
+        // 4. 按需渲染 (脏标记或动画进行中才重绘)
+        if data.state.should_render() {
             let render_start = std::time::Instant::now();
             render_all(&mut data.renderer, &data.shaders, &mut data.surfaces, &data.state, &data.cursor);
             let render_ms = render_start.elapsed().as_millis() as u64;
@@ -439,7 +426,7 @@ pub fn run(config: crate::config::LingxiConfig) {
             // 调试: 渲染 > 5ms 就 warn, 找出卡顿
             if render_ms > 5 {
                 tracing::warn!("[perf] render {}ms (windows={}, has_anim={})",
-                    render_ms, data.state.space.elements().count(), animating);
+                    render_ms, data.state.space.elements().count(), data.state.animations.has_active_animations());
             }
             if frame_count <= 10 || frame_count % 300 == 0 {
                 let win_count = data.state.space.elements().count();

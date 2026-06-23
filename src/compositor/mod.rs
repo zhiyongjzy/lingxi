@@ -618,6 +618,23 @@ impl LingxiState {
         }
     }
 
+    /// 主循环共享子序列: 刷新 space / 清 popup / arrange layer / 推进动画.
+    /// winit 与 drm 两个后端主循环共用, 避免重复 (架构 F).
+    /// 注: dispatch_clients/flush 与 event_loop.dispatch 的顺序两后端刻意不同, 不在此统一.
+    pub fn pre_render_tick(&mut self) {
+        self.space.refresh();
+        self.popup_manager.cleanup();
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            let _ = smithay::desktop::layer_map_for_output(&output).arrange();
+        }
+        self.tick_animations();
+    }
+
+    /// 本帧是否需要渲染 (脏标记或动画进行中)
+    pub fn should_render(&self) -> bool {
+        self.needs_render || self.animations.has_active_animations()
+    }
+
     /// Get the currently focused window (matching keyboard focus surface)
     pub fn focused_window(&self) -> Option<Window> {
         let keyboard = self.seat.get_keyboard()?;
