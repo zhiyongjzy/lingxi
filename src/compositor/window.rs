@@ -175,8 +175,11 @@ impl AnimationManager {
         let mut any_finished = false;
         for (window, anim) in &mut self.animations {
             let was_animating = anim.is_animating();
+            if !was_animating {
+                continue; // 跳过未在动画的窗口, 避免每帧 clone+map 全部窗口 (review #22)
+            }
             anim.tick();
-            if was_animating && !anim.is_animating() {
+            if !anim.is_animating() {
                 any_finished = true;
             }
             updates.push((window.clone(), anim.current.to_point()));

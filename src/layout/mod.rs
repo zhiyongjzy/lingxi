@@ -90,53 +90,6 @@ impl LayoutEngine for DwindleLayout {
     }
 }
 
-/// Master-Stack 布局
-/// 左边一个大窗口，右边竖排堆叠
-pub struct MasterStackLayout {
-    pub master_ratio: f64,
-}
-
-impl Default for MasterStackLayout {
-    fn default() -> Self {
-        Self { master_ratio: 0.55 }
-    }
-}
-
-impl LayoutEngine for MasterStackLayout {
-    fn arrange(&self, window_count: usize, area: WindowGeometry) -> Vec<WindowGeometry> {
-        if window_count == 0 {
-            return vec![];
-        }
-        if window_count == 1 {
-            return vec![area];
-        }
-
-        let mut result = Vec::with_capacity(window_count);
-
-        // Master window
-        let master_width = area.width * self.master_ratio;
-        result.push(WindowGeometry {
-            width: master_width,
-            ..area
-        });
-
-        // Stack
-        let stack_width = area.width - master_width;
-        let stack_height = area.height / (window_count - 1) as f64;
-
-        for i in 0..(window_count - 1) {
-            result.push(WindowGeometry {
-                x: area.x + master_width,
-                y: area.y + stack_height * i as f64,
-                width: stack_width,
-                height: stack_height,
-            });
-        }
-
-        result
-    }
-}
-
 // ============================================================================
 // 持久化 dwindle 布局树 (架构 A)
 // ============================================================================

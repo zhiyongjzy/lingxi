@@ -70,16 +70,12 @@ impl Default for AnimationConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct LayoutConfig {
-    pub default_layout: String,
-    pub master_ratio: f64,
     pub split_ratio: f64,
 }
 
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            default_layout: "dwindle".into(),
-            master_ratio: 0.55,
             split_ratio: 0.5,
         }
     }
@@ -89,6 +85,7 @@ impl Default for LayoutConfig {
 #[serde(default)]
 pub struct DecorationConfig {
     pub rounding: u32,
+    /// 模糊开关 (当前为预留, 未实际实现 — shaders 已编译但 scene 未调用, review #13)
     pub blur_enabled: bool,
     pub blur_size: u32,
     pub blur_passes: u32,

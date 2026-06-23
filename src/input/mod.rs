@@ -318,18 +318,14 @@ impl LingxiState {
         let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
         tracing::info!("启动命令: {} (WAYLAND_DISPLAY={}, XDG_RUNTIME_DIR={})", cmd, wayland_display, xdg);
 
-        // Split command into program and args
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        if parts.is_empty() {
+        // 用 sh -c 执行, 支持引号参数 / 管道 (review #17)
+        if cmd.trim().is_empty() {
             return;
         }
 
-        let mut command = Command::new(parts[0]);
-        if parts.len() > 1 {
-            command.args(&parts[1..]);
-        }
-
-        match command
+        match Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
             .env("XDG_RUNTIME_DIR", &xdg)
             .env("WAYLAND_DISPLAY", &wayland_display)
             .env("GDK_BACKEND", "wayland")
@@ -340,7 +336,7 @@ impl LingxiState {
             .stderr(Stdio::null())
             .spawn()
         {
-            Ok(child) => tracing::info!("已启动 {} (pid={})", parts[0], child.id()),
+            Ok(child) => tracing::info!("已启动 {} (pid={})", cmd, child.id()),
             Err(e) => tracing::error!("启动命令失败: {} - {}", cmd, e),
         }
     }
