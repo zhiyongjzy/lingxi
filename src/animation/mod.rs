@@ -100,6 +100,9 @@ fn spring_sample(t: f64, stiffness: f64, damping: f64, mass: f64) -> f64 {
         // 欠阻尼 (有回弹)
         let omega_d = omega * (1.0 - zeta * zeta).sqrt();
         1.0 - (-zeta * omega * t).exp() * ((zeta * omega * t / omega_d).sin() + (omega_d * t).cos())
+    } else if zeta == 1.0 {
+        // 临界阻尼 (重根) — 专用公式, 避免过阻尼分支除以 (r1-r2)=0 产生 NaN
+        1.0 - (1.0 + omega * t) * (-omega * t).exp()
     } else {
         // 过阻尼 (无回弹，平滑到达)
         let r1 = -omega * (zeta + (zeta * zeta - 1.0).sqrt());

@@ -246,7 +246,13 @@ impl LingxiConfig {
         let config_path = dirs_config_path();
         match std::fs::read_to_string(&config_path) {
             Ok(content) => {
-                let mut config: Self = toml::from_str(&content).unwrap_or_default();
+                let mut config: Self = match toml::from_str(&content) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("配置解析失败, 回退默认值: {e}");
+                        Self::default()
+                    }
+                };
                 // If no binds in config file, use defaults
                 if config.binds.is_empty() {
                     config.binds = default_binds();

@@ -221,10 +221,10 @@ impl LingxiState {
                     // Super+Shift+方向键: 移动浮动窗口 50px
                     let raw = sym.raw();
                     let (dx, dy) = match raw {
-                        0xff51 => (  0.0, -50.0), // Left
-                        0xff53 => (  0.0,  50.0), // Right
-                        0xff52 => (-50.0,   0.0), // Up
-                        0xff54 => ( 50.0,   0.0), // Down
+                        0xff51 => (-50.0,   0.0), // Left
+                        0xff53 => ( 50.0,   0.0), // Right
+                        0xff52 => (  0.0, -50.0), // Up
+                        0xff54 => (  0.0,  50.0), // Down
                         _ => (0.0, 0.0),
                     };
                     if dx != 0.0 || dy != 0.0 {
@@ -679,7 +679,10 @@ fn check_configurable_keybind(
     keysym: &KeysymHandle,
     parsed_binds: &[(ParsedKeyBind, String, Option<String>)],
 ) -> Option<Action> {
-    let sym = keysym.modified_sym().raw();
+    // 用未修饰的 raw_syms 匹配: Shift+1 的 raw sym 仍是 '1' (0x31),
+    // 能正确命中数字绑定. 旧实现用 modified_sym() 导致 Shift+1 变成 '!' (0x21),
+    // Super+Shift+数字 (movetoworkspace) 全部失效.
+    let syms = keysym.raw_syms();
 
     for (bind, action, arg) in parsed_binds {
         // Check modifiers match
@@ -696,19 +699,10 @@ fn check_configurable_keybind(
             continue;
         }
 
-        // Check keysym match (case-insensitive for letters)
+        // Check keysym match (raw, 未修饰 — 字母无需大小写回退, 数字也能匹配)
         let bind_sym = bind.keysym;
-        if sym != bind_sym {
-            // Also try uppercase version for letter keys
-            if bind_sym >= 0x61 && bind_sym <= 0x7a {
-                // lowercase letter
-                let upper = bind_sym - 0x20;
-                if sym != upper {
-                    continue;
-                }
-            } else {
-                continue;
-            }
+        if !syms.iter().any(|s| s.raw() == bind_sym) {
+            continue;
         }
 
         // Match! Convert action string to Action enum

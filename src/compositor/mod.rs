@@ -418,17 +418,6 @@ impl LingxiState {
         self.relayout();
     }
 
-    /// 检查全屏过渡超时 (500ms 后强制 Active)
-    pub fn check_fullscreen_timeout(&mut self) {
-        if let FullscreenPhase::Pending { since, .. } = self.fs_phase {
-            if since.elapsed() > std::time::Duration::from_millis(500) {
-                tracing::warn!("全屏过渡超时, 强制 Active");
-                self.fs_phase = FullscreenPhase::Active;
-                self.relayout();
-            }
-        }
-    }
-
     /// 切换焦点窗口的浮动/平铺状态
     pub fn toggle_floating(&mut self) {
         let focused = match self.focused_window() {
