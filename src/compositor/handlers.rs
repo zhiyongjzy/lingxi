@@ -54,6 +54,26 @@ impl CompositorHandler for LingxiState {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // 首次带 buffer 的 commit → 进平铺 (Wayland map 状态). 必须在 on_commit_buffer_handler
+        // 之前检查 — 该 handler 会 take() 消费 SurfaceAttributes.buffer, 之后读永远是 None.
+        // wl-clipboard 等只读 selection 的客户端建 toplevel 但从不 attach buffer, 故永不进平铺 (不闪).
+        if !self.mapped_surfaces.contains(surface) {
+            if let Some(window) = self.by_surface.get(surface).cloned() {
+                let has_buffer = smithay::wayland::compositor::with_states(surface, |states| {
+                    states
+                        .cached_state
+                        .get::<smithay::wayland::compositor::SurfaceAttributes>()
+                        .current()
+                        .buffer
+                        .is_some()
+                });
+                if has_buffer {
+                    self.mapped_surfaces.insert(surface.clone());
+                    self.map_new_window(&window);
+                }
+            }
+        }
+
         use smithay::backend::renderer::utils::on_commit_buffer_handler;
         on_commit_buffer_handler::<Self>(surface);
         // popup 第一次 commit 时从 unmapped 移到 mapped tree — 必须让 PopupManager 知道
@@ -116,87 +136,22 @@ impl XdgShellHandler for LingxiState {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface.clone());
 
-        // 获取输出中心作为入场动画起点
-        let output_center = self
-            .space
-            .outputs()
-            .next()
-            .and_then(|o| self.space.output_geometry(o))
-            .map(|geo| (geo.size.w as f64 / 2.0, geo.size.h as f64 / 2.0))
-            .unwrap_or((640.0, 400.0));
-
-        // Add window to current workspace + 布局树加叶子 (新窗口默认 tiled)
+        // 注册到当前 workspace + surface 索引 (但不进平铺 — 等首次带 buffer commit)
         let active = self.active_workspace;
         self.workspaces[active].push(window.clone());
-        // 维护 surface→Window 索引 (O(1) 查找用)
         self.by_surface.insert(surface.wl_surface().clone(), window.clone());
-        self.layout_trees[active].insert();
 
-        // 先把窗口 map 到 space (初始位置放中心)
-        self.space.map_element(window.clone(), (output_center.0 as i32, output_center.1 as i32), true);
-
-        // 计算新的平铺布局 (布局树, 含刚加入的窗口)
-        let area = self.usable_area();
-        let geometries = self.layout_trees[active].arrange(area);
-        let tiled: Vec<Window> = self.workspaces[active]
-            .iter()
-            .filter(|w| !self.floating.contains(w))
-            .cloned()
-            .collect();
-        let count = tiled.len();
-
-        // 新窗口在 tiled 末尾 (刚 push), 取其目标几何做入场动画
-        let new_idx = tiled.iter().position(|w| w == &window).unwrap_or(count.saturating_sub(1));
-        let target = super::window::AnimatedRect {
-            x: geometries[new_idx].x,
-            y: geometries[new_idx].y,
-            width: geometries[new_idx].width,
-            height: geometries[new_idx].height,
-        };
-
-        // 注册入场动画 (从中心缩放飞入)
-        self.animations.add_window(window, target, output_center);
-
-        // 其他已有窗口也要动画到新位置 (重新平铺)
-        let targets: Vec<_> = tiled
-            .iter()
-            .zip(geometries.iter())
-            .map(|(w, geo)| {
-                (
-                    w.clone(),
-                    super::window::AnimatedRect {
-                        x: geo.x,
-                        y: geo.y,
-                        width: geo.width,
-                        height: geo.height,
-                    },
-                )
-            })
-            .collect();
-        self.animations.retarget(&targets);
-
-        // 告诉所有窗口新的 configure size (让客户端缩放)
-        for (i, w) in tiled.iter().enumerate() {
-            if let Some(toplevel) = w.toplevel() {
-                toplevel.with_pending_state(|pending| {
-                    pending.size = Some(
-                        (geometries[i].width as i32, geometries[i].height as i32).into(),
-                    );
-                });
-                toplevel.send_configure();
-            }
+        // 发初始 configure (不指定 size, client 自选; 真正 tiled size 在 map_new_window 时发)
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.send_configure();
         }
 
-        // 自动聚焦新窗口 (同时通知 data_device / primary_selection)
+        // 聚焦新 toplevel (selection 客户端如 wl-clipboard 靠 data_device 焦点读 selection,
+        // 故焦点在创建时即给, 不推迟到 map; 平铺才推迟)
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-        self.set_keyboard_focus_with_selection(
-            Some(surface.wl_surface().clone()),
-            serial,
-        );
+        self.set_keyboard_focus_with_selection(Some(surface.wl_surface().clone()), serial);
 
-        tracing::info!("新窗口已创建 (dwindle 平铺, {}个窗口, workspace {}, 目标尺寸: {}x{})",
-            count, self.active_workspace + 1, geometries[new_idx].width as i32, geometries[new_idx].height as i32);
-
+        tracing::info!("新 toplevel 创建 (待首次 buffer commit 后进平铺)");
         self.needs_render = true;
     }
 
@@ -245,32 +200,53 @@ impl XdgShellHandler for LingxiState {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let window = self.by_surface.get(surface.wl_surface()).cloned();
         if let Some(window) = window {
-            // 移除 surface→Window 索引
-            self.by_surface.remove(surface.wl_surface());
-            // 布局树: tiled 窗口删对应叶子 (浮动不在树中). 必须在 retain 之前算槽位.
-            if !self.floating.contains(&window) {
+            let wl = surface.wl_surface().clone();
+            let was_mapped = self.mapped_surfaces.contains(&wl);
+            let was_floating = self.floating.contains(&window);
+            let was_focused = self
+                .seat
+                .get_keyboard()
+                .and_then(|kb| kb.current_focus())
+                .map(|f| &f == surface.wl_surface())
+                .unwrap_or(false);
+
+            // tree: 仅曾 map 且非浮动 → 删叶 (必须在 retain 之前算槽位)
+            if was_mapped && !was_floating {
                 if let Some(slot) = self.tiled_slot_of(&window) {
                     self.layout_trees[self.active_workspace].remove(slot);
                 }
             }
-            // Remove from workspace tracking
+
+            self.by_surface.remove(surface.wl_surface());
+            self.mapped_surfaces.remove(&wl);
             for ws in &mut self.workspaces {
                 ws.retain(|w| w != &window);
             }
-
-            // Clear fullscreen state if this window was fullscreen
             if self.fullscreen_window.as_ref() == Some(&window) {
                 self.fullscreen_window = None;
             }
-
-            // 清理浮动跟踪 (FloatingManager.remove 同时清 window/geo/z, 修复旧 z_order 泄漏)
             self.floating.remove(&window);
-
             self.animations.remove_window(&window);
-            self.space.unmap_elem(&window);
-            // 重新平铺剩余窗口 (带动画)
-            self.relayout();
-            tracing::info!("窗口已关闭 (重新平铺)");
+
+            if was_mapped {
+                self.space.unmap_elem(&window);
+                self.relayout();
+                tracing::info!("窗口已关闭 (重新平铺)");
+            } else {
+                // 从未 map 的瞬态 toplevel (如 wl-clipboard): 不在树/space, 不触发重排
+                tracing::info!("瞬态 toplevel 销毁 (未进平铺, 不重排)");
+            }
+
+            // 若销毁的窗口持有焦点 (wl-clipboard 等瞬态 toplevel 抢的), 恢复到当前工作区首个窗口
+            if was_focused {
+                let active = self.active_workspace;
+                let focus_target = self.workspaces[active]
+                    .first()
+                    .and_then(|w| w.toplevel())
+                    .map(|t| t.wl_surface().clone());
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.set_keyboard_focus_with_selection(focus_target, serial);
+            }
         }
         // 清理 popup manager 里的死资源
         self.popup_manager.cleanup();

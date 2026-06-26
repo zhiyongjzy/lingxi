@@ -201,6 +201,11 @@ pub struct LingxiState {
         smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         Window,
     >,
+    /// 已 map (首次带 buffer commit) 的 toplevel wl_surface 集合.
+    /// wl-clipboard 等瞬态客户端建 toplevel 但从不 commit buffer, 不在此集 → 不进平铺.
+    pub mapped_surfaces: std::collections::HashSet<
+        smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    >,
 
     /// 当前全屏窗口 (None = 无全屏)
     pub fullscreen_window: Option<Window>,
@@ -316,6 +321,7 @@ impl LingxiState {
             workspaces,
             active_workspace: 0,
             by_surface: std::collections::HashMap::new(),
+            mapped_surfaces: std::collections::HashSet::new(),
             fullscreen_window: None,
             floating: FloatingManager::new(),
             fs_phase: FullscreenPhase::Off,
@@ -397,12 +403,80 @@ impl LingxiState {
         }
     }
 
-    /// 重新计算布局并动画过渡所有窗口到新位置
-    /// 取窗口在当前工作区 tiled 列表中的槽位 (排除浮动). 用于布局树 insert/remove 定位.
+    /// 是否为"已 map 的平铺窗口" (非浮动 + 已首次 commit buffer).
+    /// 排除 wl-clipboard 等建 toplevel 但从不 attach buffer 的瞬态客户端 — 它们不进平铺.
+    /// 树叶子数必须 == tiled 窗口数, 故所有 tiled 过滤都用此判断.
+    pub fn is_tiled_window(&self, w: &Window) -> bool {
+        !self.floating.contains(w)
+            && w.toplevel()
+                .map(|t| self.mapped_surfaces.contains(t.wl_surface()))
+                .unwrap_or(false)
+    }
+
+    /// 首次带 buffer commit 时调用: 把 toplevel 真正进平铺 (map + tree.insert + 入场动画 + configure).
+    /// 旧实现在 new_toplevel 创建即铺, 导致 wl-clipboard 等从不 commit buffer 的瞬态 toplevel 也被铺 → 闪烁.
+    fn map_new_window(&mut self, window: &Window) {
+        let active = self.active_workspace;
+        let output_center = self
+            .space
+            .outputs()
+            .next()
+            .and_then(|o| self.space.output_geometry(o))
+            .map(|geo| (geo.size.w as f64 / 2.0, geo.size.h as f64 / 2.0))
+            .unwrap_or((640.0, 400.0));
+
+        self.layout_trees[active].insert();
+        self.space.map_element(window.clone(), (output_center.0 as i32, output_center.1 as i32), true);
+
+        let area = self.usable_area();
+        let geometries = self.layout_trees[active].arrange(area);
+        let tiled: Vec<Window> = self.workspaces[active]
+            .iter()
+            .filter(|w| self.is_tiled_window(w))
+            .cloned()
+            .collect();
+        let count = tiled.len();
+        let new_idx = tiled.iter().position(|w| w == window).unwrap_or(count.saturating_sub(1));
+        let target = AnimatedRect {
+            x: geometries[new_idx].x,
+            y: geometries[new_idx].y,
+            width: geometries[new_idx].width,
+            height: geometries[new_idx].height,
+        };
+
+        self.animations.add_window(window.clone(), target, output_center);
+
+        let targets: Vec<_> = tiled
+            .iter()
+            .zip(geometries.iter())
+            .map(|(w, geo)| {
+                (
+                    w.clone(),
+                    AnimatedRect { x: geo.x, y: geo.y, width: geo.width, height: geo.height },
+                )
+            })
+            .collect();
+        self.animations.retarget(&targets);
+
+        for (i, w) in tiled.iter().enumerate() {
+            if let Some(toplevel) = w.toplevel() {
+                toplevel.with_pending_state(|pending| {
+                    pending.size = Some((geometries[i].width as i32, geometries[i].height as i32).into());
+                });
+                toplevel.send_configure();
+            }
+        }
+
+        tracing::info!("新窗口已 map (dwindle 平铺, {}个窗口, workspace {}, 目标尺寸: {}x{})",
+            count, active + 1, geometries[new_idx].width as i32, geometries[new_idx].height as i32);
+        self.needs_render = true;
+    }
+
+    /// 取窗口在当前工作区 tiled 列表中的槽位 (已 map 且非浮动). 用于布局树 insert/remove 定位.
     fn tiled_slot_of(&self, window: &Window) -> Option<usize> {
         self.workspaces[self.active_workspace]
             .iter()
-            .filter(|w| !self.floating.contains(w))
+            .filter(|w| self.is_tiled_window(w))
             .position(|w| w == window)
     }
 
@@ -431,10 +505,13 @@ impl LingxiState {
                 self.floating
                     .geo(w)
                     .unwrap_or(WindowGeometry { x: area.x + 100.0, y: area.y + 100.0, width: 800.0, height: 600.0 })
-            } else {
+            } else if self.is_tiled_window(w) {
                 let g = geometries.get(tiled_idx).copied().unwrap_or(area);
                 tiled_idx += 1;
                 g
+            } else {
+                // 未 map 的瞬态 toplevel (如 wl-clipboard): 不分配 target, 不 configure
+                continue;
             };
             targets.push((
                 w.clone(),
@@ -730,7 +807,7 @@ impl LingxiState {
             let geometries = self.layout_trees[target].arrange(area);
             let tiled: Vec<Window> = ws_windows
                 .iter()
-                .filter(|w| !self.floating.contains(w))
+                .filter(|w| self.is_tiled_window(w))
                 .cloned()
                 .collect();
 

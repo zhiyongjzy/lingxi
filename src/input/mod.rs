@@ -417,7 +417,7 @@ impl LingxiState {
         // tiled 列表 (workspaces 顺序, 排除浮动) — 与布局树槽位对齐
         let tiled: Vec<_> = self.workspaces[active]
             .iter()
-            .filter(|w| !self.floating.contains(w))
+            .filter(|w| self.is_tiled_window(w))
             .cloned()
             .collect();
         if tiled.len() < 2 {
